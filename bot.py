@@ -258,7 +258,7 @@ def classify_decline(status, message, reason):
 
     if any(k in combined for k in ["do not honor", "do_not_honor", "issuer_decline",
                                     "declined by issuer", "restricted card"]):
-        return "issuer_decline", f"Do Not Honor — {message[:80]}"
+        return "issuer_decline", f"Card Issuer Declined — {message[:80]}"
 
     if any(k in combined for k in ["blocked", "stolen", "lost", "pickup", "pick up",
                                     "card_blocked", "card_restricted"]):
@@ -280,7 +280,7 @@ def classify_decline(status, message, reason):
         return "processor_error", f"Processor Error — {message[:80]}"
 
     if status == "ISSUER_DECLINE":
-        return "issuer_decline", f"Issuer Declined — {message[:80]}"
+        return "issuer_decline", f"Card Issuer Declined — {message[:80]}"
 
     return "failed", (message or reason or "Declined")[:120]
 
@@ -474,7 +474,8 @@ def jio_check(phone, amount, card, proxy_str=None):
 
         if not cd.get("status"):
             msg = cd.get("message", "Card confirmation failed")
-            return classify_decline("CONFIRM_FAIL", msg, ""), meta
+            key, m2 = classify_decline("CONFIRM_FAIL", msg, "")
+            return key, m2, meta
 
         html_form = cd.get("htmlForm", "")
         if not html_form:
@@ -508,7 +509,8 @@ def jio_check(phone, amount, card, proxy_str=None):
 
         if "declined" in txt or "do not honor" in txt:
             dm = re.search(r'(declined[^<]{0,80}|do not honor[^<]{0,80})', txt)
-            return classify_decline("ISSUER_DECLINE", dm.group(1) if dm else "Declined by issuer", ""), meta
+            key, m2 = classify_decline("ISSUER_DECLINE", dm.group(1) if dm else "Declined by issuer", "")
+            return key, m2, meta
 
         m = re.search(r'x-gl-token=([^&\s"\'\\]+)', r.url + r.text)
         if not m:
@@ -591,7 +593,7 @@ def status_head(status):
         "expired": "📅 <b>CARD EXPIRED</b>",
         "invalid_cvv": "🔒 <b>INVALID CVV</b>",
         "invalid_card": "❌ <b>INVALID CARD</b>",
-        "issuer_decline": "🚫 <b>DO NOT HONOR</b>",
+        "issuer_decline": "🚫 <b>CARD ISSUER DECLINED</b>",
         "blocked": "🔴 <b>CARD BLOCKED</b>",
         "not_permitted": "⛔ <b>NOT PERMITTED</b>",
         "limit_exceeded": "📊 <b>LIMIT EXCEEDED</b>",
